@@ -1,0 +1,4 @@
+[submodule "dolphin"]
+	path = dolphin
+	url = https://github.com/dolphin-emu/dolphin.git
+	shallow = true

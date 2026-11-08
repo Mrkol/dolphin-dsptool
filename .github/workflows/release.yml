@@ -1,0 +1,102 @@
+name: Release DSPTool
+run-name: Release DSPTool for Dolphin ${{ inputs.dolphin_tag }} (packaging revision ${{ inputs.packaging_revision }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      dolphin_tag:
+        description: 'Dolphin tag, or latest for the newest release including hotfixes'
+        required: true
+        default: latest
+        type: string
+      packaging_revision:
+        description: '1 mirrors the Dolphin tag; use 2 or higher for a packaging fix'
+        required: true
+        default: '1'
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize publishing so two button presses cannot publish the same version.
+concurrency:
+  group: dsptool-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve Dolphin tag and prepare release commit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      skip: ${{ steps.prepare.outputs.skip }}
+      version: ${{ steps.prepare.outputs.version }}
+      dolphin_tag: ${{ steps.prepare.outputs.dolphin_tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          submodules: false
+          # Read-only token permits checking remote tags in private repositories.
+          persist-credentials: true
+      - name: Test release orchestration
+        run: python3 -m unittest discover -s tests -p test_release.py -v
+      - name: Prepare pinned release bundle
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          DOLPHIN_TAG: ${{ inputs.dolphin_tag }}
+          PACKAGING_REVISION: ${{ inputs.packaging_revision }}
+        run: >-
+          python3 scripts/release.py prepare
+          --tag "$DOLPHIN_TAG" --revision "$PACKAGING_REVISION"
+          --repository "$REPOSITORY" --output "$RUNNER_TEMP/dsptool-release"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: steps.prepare.outputs.skip == 'false'
+        with:
+          name: release-input
+          path: ${{ runner.temp }}/dsptool-release/*
+          if-no-files-found: error
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.skip == 'false'
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      dolphin_tag: ${{ needs.prepare.outputs.dolphin_tag }}
+      release_artifact: release-input
+
+  publish:
+    name: Publish tested release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Only this job needs credentials to push the tested release tag.
+          persist-credentials: true
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-input
+          path: ${{ runner.temp }}/dsptool-release
+      - name: Check out tested release commit
+        run: python3 scripts/release.py checkout --input "$RUNNER_TEMP/dsptool-release"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: dsptool-*
+          merge-multiple: true
+          path: dist
+      - name: Publish binaries, source, and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 scripts/release.py publish
+          --input "$RUNNER_TEMP/dsptool-release" --dist dist
+          --repository "$REPOSITORY"
